@@ -1,5 +1,4 @@
 """Dynamic Programming Decision Tree (DPDTree) classifier implementation."""
-"""Code from https://github.com/KohlerHECTOR/DPDTreeEstimator"""
 from copy import deepcopy
 from numbers import Integral, Real
 

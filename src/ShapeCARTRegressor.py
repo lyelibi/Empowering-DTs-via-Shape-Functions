@@ -3,10 +3,15 @@ import numpy as np
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier
 from src.BranchingTreeRegressor import BranchingTreeRegressor
-from BiCART import BiCARTClassifier
+from src.BiCART import BiCARTClassifier
+from sklearn.metrics import accuracy_score
+import contextlib
+import io
 import gc
 import random
+import time
 from sklearn.dummy import DummyClassifier
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 
 class ShapeCARTRegressor:
@@ -34,7 +39,7 @@ class ShapeCARTRegressor:
                  tao_reg:int = 0,
                  tao_pair_scale: float = 1.1,
                  # pairwise control
-                 pairwise_candidates: int = 0,
+                 pairwise_candidates: int | float = 0,
                  pairwise_penalty: float = 0.0,
                  random_pairs: bool = False,
                  H: int = 5,
@@ -131,10 +136,10 @@ class ShapeCARTRegressor:
     
     def data_assert(self, X, y):
         assert len(X) == len(y), 'X and y must have the same length'
-        assert len(y.shape) == 2, 'y must be a 1D array'
+        assert len(y.shape) in [1, 2], 'y must be a 1D or 2D array'
         assert len(X.shape) == 2, 'X must be a 2D array'
         assert len(y) > 1, 'X and y must have at least 2 samples'  
-    @profile
+
     def fit(self, X: np.ndarray | pd.DataFrame, y: np.ndarray | pd.Series, feature_dict: dict = None):
         if isinstance(X, pd.DataFrame):
             X = X.values
@@ -142,15 +147,22 @@ class ShapeCARTRegressor:
             y = y.values
         # print(feature_dict)
         self.data_assert(X, y)
+
+        # Normalize y to 2D for consistent handling
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+        self.n_targets = y.shape[1]
+
         #check if min_samples_split is a float
         if isinstance(self.min_samples_split, float):
             self.min_samples_split = int( np.ceil(self.min_samples_split * len(X)))
         # feature_dict format: {key: (is_categorical, [list of indices])}
         self.feature_dict, self.categorical_dict = self.configure_feature_dict(X, feature_dict)
+        if isinstance(self.pairwise_candidates, float):
+            self.pairwise_candidates = int(np.ceil(self.pairwise_candidates * len(self.feature_dict)))
 
-        # init_distribution = 
-        # dist_sum = np.sum(init_distribution)
-        init_distribution = np.mean(y)
+        # init_distribution: shape (n_targets,) for multi-target
+        init_distribution = np.mean(y, axis=0)
         self.verbose_print(f'Initial distribution: {init_distribution}')
         self.nodes = [None]
         self.values = [init_distribution]
@@ -303,16 +315,19 @@ class ShapeCARTRegressor:
         for i in range(len(self.nodes)): # cleanup
             y_points = y[self.point_idxs[i]]
             if len(y_points) == 0:
-                self.values[i] = 0
+                self.values[i] = np.zeros(self.n_targets)
                 self.n_samples[i] = 0
             else:
-                dist = np.mean(y_points)
+                dist = np.mean(y_points, axis=0)  # shape (n_targets,)
                 sum = len(y_points)
                 self.values[i] = dist
                 self.n_samples[i] = sum
         gc.collect()
         if self.use_tao:
-            self.run_tao(X, y)
+            if self.n_targets > 1:
+                self.verbose_print('TAO optimization is not supported for multi-target regression. Skipping TAO.')
+            else:
+                self.run_tao(X, y)
 
     def run_tao(self, X: np.ndarray, y: np.ndarray):
         for run in range(self.n_runs):
@@ -489,17 +504,17 @@ class ShapeCARTRegressor:
         y_points = y_[point_idxs]
         self.point_idxs[node_idx] = point_idxs
         if len(y_points) == 0:
-            self.values[node_idx] = 0
+            self.values[node_idx] = np.zeros(self.n_targets)
             self.n_samples[node_idx] = 0
             self.impurity[node_idx] = 0
             self.is_leaf[node_idx] = True
             return
         else:
-            dist = np.mean(y_points)
+            dist = np.mean(y_points, axis=0)  # shape (n_targets,)
             sum = len(y_points)
             self.values[node_idx] = dist
             self.n_samples[node_idx] = sum
-            self.impurity[node_idx] = np.var(y_points)
+            self.impurity[node_idx] = np.mean(np.var(y_points, axis=0))  # mean variance across targets
         if len(rel_points) == 0:
             return 
         node = self.nodes[node_idx]
@@ -514,48 +529,52 @@ class ShapeCARTRegressor:
             self.recurse_predict_and_recalc(X_, y_, rel_child_idx, new_point_idxs)
 
     def recurse_predict(self, X, node):
-        try: 
+        try:
             self.is_leaf[node]
         except IndexError:
             print(node)
             raise Exception('Error')
 
+        n_samples = X.shape[0]
         if self.is_leaf[node]:
-            return np.ones(X.shape[0]).astype(int) * self.values[node]
+            # self.values[node] has shape (n_targets,)
+            # Return shape (n_samples, n_targets)
+            return np.broadcast_to(self.values[node], (n_samples, self.n_targets)).astype(np.float32)
         else:
             node_children = self.children[node]
             node_pred = self.nodes[node].predict(X)
-            result = np.zeros(X.shape[0]).astype(np.float32)
+            result = np.zeros((n_samples, self.n_targets), dtype=np.float32)
             for i, child in enumerate(node_children):
-                mask = node_pred == i
-                mask = mask.astype(np.float32)
+                mask = (node_pred == i).reshape(-1, 1)  # shape (n_samples, 1) for broadcasting
                 result += mask * self.recurse_predict(X, child)
             return result
-    
+
     def recurse_predict_limit(self, X, node, depth_limit):
         if self.depths[node] > depth_limit:
             raise ValueError('Depth limit must be greater than or equal to the depth of the node')
+        n_samples = X.shape[0]
         if self.is_leaf[node]:
-            return np.ones(X.shape[0]).astype(np.float32) * self.values[node]
+            return np.broadcast_to(self.values[node], (n_samples, self.n_targets)).astype(np.float32)
         elif self.depths[node] == depth_limit:
-            return np.ones(X.shape[0]).astype(np.float32) * self.values[node]
+            return np.broadcast_to(self.values[node], (n_samples, self.n_targets)).astype(np.float32)
         else:
             node_children = self.children[node]
             node_pred = self.nodes[node].predict(X)
-            result = np.zeros(X.shape[0]).astype(np.float32)
+            result = np.zeros((n_samples, self.n_targets), dtype=np.float32)
             for i, child in enumerate(node_children):
-                mask = node_pred == i
+                mask = (node_pred == i).reshape(-1, 1)  # shape (n_samples, 1)
                 result += mask * self.recurse_predict_limit(X, child, depth_limit=depth_limit)
             return result
-    
+
     def predict(self, X, max_depth=None):
         if isinstance(X, pd.DataFrame):
             X = X.values
         if max_depth is not None:
-            predictions =  self.recurse_predict_limit(X, 0, max_depth)
+            predictions = self.recurse_predict_limit(X, 0, max_depth)
         else:
             predictions = self.recurse_predict(X, 0)
-        return predictions.reshape(-1, 1)
+        # predictions has shape (n_samples, n_targets)
+        return predictions
 
 
 

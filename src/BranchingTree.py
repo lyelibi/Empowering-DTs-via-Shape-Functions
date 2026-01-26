@@ -418,6 +418,7 @@ class BranchingTree:
                 mapping = np.zeros(max_leaf+1, dtype=np.int32)
                 for i, leaf in enumerate(leaf_nodes):
                     mapping[leaf] = i
+                # mapping = {leaf_nodes[i]: i for i in range(self.k)}
                 return_dict= {
                     'weighted_distributions': {i: v for i, v in enumerate(weighted_distributions)},
                     'impurities': {i: v for i, v in enumerate(leaf_impurity)},
@@ -448,6 +449,7 @@ class BranchingTree:
             if curr_solution is None:
                 continue
             # check for conditions
+
             mapping_ = curr_solution['mapping']
             if self.pairwise_candidates > 0:
                 branching = mapping_[apply_]
@@ -472,7 +474,7 @@ class BranchingTree:
                     kmeans.fit(leaf_distributions, sample_weight=leaf_samples)
                     assignments = kmeans.labels_
                 except Warning:
-                    # this means that the # of distinct points is less than k_, we can fallback to random init
+                    # this means that the # of distinct points is less than k_
                     assignments = np.random.randint(0, k_, size=len(leaf_nodes))
         else:
             assignments = np.random.randint(0, k_, size=len(leaf_nodes))
@@ -488,7 +490,11 @@ class BranchingTree:
         leaf_side_partition_weighted_distributions = np.zeros((k_, leaf_distributions.shape[1]), dtype=np.float64)
         if leaf_sides is not None:
             for i in range(k_):
-                mask = leaf_sides == i
+                mask = (assignments == i) & (leaf_sides == 0)
+                weighted_distributions = leaf_weighted_dists[mask]
+                partition_weighted_distribution = np.sum(weighted_distributions, axis = 0)
+                leaf_side_partition_weighted_distributions[i] += partition_weighted_distribution
+                mask = (assignments == i) & (leaf_sides == 1)
                 weighted_distributions = leaf_weighted_dists[mask]
                 partition_weighted_distribution = np.sum(weighted_distributions, axis = 0)
                 leaf_side_partition_weighted_distributions[i] += partition_weighted_distribution
@@ -595,13 +601,15 @@ def run_descent(n_leaf_nodes: int,
     total_impurity = calculate_total_impurity(
         partition_weighted_distributions, criterion_flag=criterion_flag
     )
-    if leaf_sides is not None: # if we have leaf sides, check if they are better. if yes, use them as init
+    if leaf_sides is not None:
         leaf_sides_total_impurity = calculate_total_impurity(
             leaf_side_partition_weighted_distributions, criterion_flag=criterion_flag
         )
         if leaf_sides_total_impurity < total_impurity:
-            total_impurity = leaf_sides_total_impurity
-            assignments = leaf_sides.copy()
+            total_impurity = leaf_sides_total_impurity 
+            # Assign leaf sides to the assignments
+            for i in range(n_leaf_nodes):  # use the leaf_sides to assign the sides
+                assignments[i] = leaf_sides[i]
             partition_weighted_distributions = leaf_side_partition_weighted_distributions.copy()
         else:
             leaf_sides_total_impurity = np.inf

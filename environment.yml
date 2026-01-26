@@ -17,6 +17,8 @@ dependencies:
   - scikit-learn
   - seaborn
   - h5py
+  - interpret
+  - py-xgboost
   - networkx
   - pip:
       - nbdev
@@ -25,3 +27,9 @@ dependencies:
       - kaleido
       - openml
       - ucimlrepo
+      - imodels
+      - line-profiler
+      - pydot
+      - dot2tex
+      - gosdt
+      - git+https://github.com/KohlerHECTOR/DPDTreeEstimator

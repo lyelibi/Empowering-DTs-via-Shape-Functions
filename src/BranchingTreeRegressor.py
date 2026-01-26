@@ -4,7 +4,7 @@ import itertools
 import queue
 import warnings
 from sklearn.cluster import KMeans
-from BiCART import BiCARTRegressor
+from src.BiCART import BiCARTRegressor
 from line_profiler import profile
 from argparse import Namespace
 class KMeansBranch:
@@ -16,27 +16,41 @@ class KMeansBranch:
     def fit(self, X, y):
         """
         Fit the KMeans model to the data.
+        Supports both single-target (n_samples,) and multi-target (n_samples, n_targets) y.
         """
         X = np.asarray(X)
+        y = np.asarray(y)
+
+        # Normalize y to 2D: (n_samples, n_targets)
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+        n_targets = y.shape[1]
+
         self.kmeans.fit(X)
         self.cluster_centers_ = self.kmeans.cluster_centers_
         self.labels_ = self.kmeans.labels_
-        
+
         """
         Store the target values for each cluster.
         """
         self.tree_.children_left = np.array([1] + [-1] * self.n_clusters)
+
+        # Impurity: mean variance across targets for compatibility
         impurity = np.zeros(self.n_clusters + 1)
-        impurity[0] = np.var(y)
-        value = np.zeros((self.n_clusters + 1, 1))
-        value[0, 0] = np.mean(y)
+        impurity[0] = np.mean(np.var(y, axis=0))
+
+        # Value shape: (n_nodes, n_targets, 1) to match sklearn DecisionTreeRegressor
+        value = np.zeros((self.n_clusters + 1, n_targets, 1))
+        value[0, :, 0] = np.mean(y, axis=0)
+
         for i in range(self.n_clusters):
             mask = self.labels_ == i
             if np.any(mask):
-                impurity[i + 1] = np.var(y[mask])
-                value[i + 1, 0] = np.mean(y[mask])
+                impurity[i + 1] = np.mean(np.var(y[mask], axis=0))
+                value[i + 1, :, 0] = np.mean(y[mask], axis=0)
             else:
                 impurity[i + 1] = 0.0
+                value[i + 1, :, 0] = 0.0
         self.tree_.impurity = impurity
         self.tree_.n_node_samples = np.array([len(y)] + [np.sum(self.labels_ == i) for i in range(self.n_clusters)])
         self.tree_.value = value
@@ -162,7 +176,6 @@ class BranchingTreeRegressor:
     def get_chosen_feature(self):
         return self.final_key
     
-    @profile
     def fit(self, X, y):
         self.verbose_print(f'Fitting BranchingTreeRegressor with {len(self.feature_dict)} features')
         total_points = X.shape[0]
@@ -228,7 +241,7 @@ class BranchingTreeRegressor:
             for keys in solutions.keys():
                 del solutions[keys]['branching']
             
-            for _ in range (self.pairwise_candidates):
+            for _ in range(self.pairwise_candidates):
                 # check if the queue is empty
                 if best_features.empty():
                     break
@@ -318,7 +331,6 @@ class BranchingTreeRegressor:
         impurity_reduction = -1 * (min_impurity - total_imp)
         return impurity_reduction
 
-    @profile
     def predict(self, X):
         if self.tao_pred:
             if self.final_key is None:
@@ -366,6 +378,7 @@ class BranchingTreeRegressor:
                 max_leaf_nodes = self.max_leaf_nodes,
                 random_state = self.random_state,
             )
+        # 
 
         tree.fit(X,y)
         self.initial_impurity = tree.tree_.impurity[0]
@@ -373,7 +386,9 @@ class BranchingTreeRegressor:
         leaf_nodes = np.where(tree.tree_.children_left == -1)[0]
         if len(leaf_nodes) == 1:
             return None, None
-        leaf_values = tree.tree_.value.squeeze(axis=1)[leaf_nodes]
+        # sklearn's tree_.value shape: (n_nodes, n_outputs, 1) for regressors
+        # squeeze axis=2 (last dim which is always 1) to get (n_nodes, n_outputs)
+        leaf_values = tree.tree_.value.squeeze(axis=2)[leaf_nodes]
         leaf_samples = tree.tree_.n_node_samples[leaf_nodes]
         leaf_error = tree.tree_.impurity[leaf_nodes]
         solutions = {}
@@ -398,7 +413,10 @@ class BranchingTreeRegressor:
                 for i, leaf in enumerate(leaf_nodes):
                     mapping[leaf] = i
                 # mapping = {leaf_nodes[i]: i for i in range(self.k)}
-                if len(leaf_values.shape) == 2:
+                # For single-target: leaf_values is (n_leaves,) or (n_leaves, 1)
+                # For multi-target: leaf_values is (n_leaves, n_targets)
+                # Only squeeze if single target (shape is (n_leaves, 1))
+                if leaf_values.ndim == 2 and leaf_values.shape[1] == 1:
                     leaf_values = leaf_values.squeeze(axis=1)
                 return_dict= {
                     'value': {i: v for i, v in enumerate(leaf_values)},
@@ -438,7 +456,6 @@ class BranchingTreeRegressor:
         else:
             return solutions, tree
     
-    @profile
     def coordinate_descent(self, k_, 
                            leaf_values, 
                            leaf_samples, 
@@ -465,10 +482,13 @@ class BranchingTreeRegressor:
         else:
             assignments = np.random.randint(0, k_, size=len(leaf_nodes))
 
-        if len(leaf_values.shape) == 2:
+        # For single-target: leaf_values is (n_leaves,) or (n_leaves, 1)
+        # For multi-target: leaf_values is (n_leaves, n_targets) - keep as-is
+        # Only squeeze if single target (shape is (n_leaves, 1))
+        if leaf_values.ndim == 2 and leaf_values.shape[1] == 1:
             leaf_values = leaf_values.squeeze(axis=1)
-        
-        # leaf_values: (n_leaves,) - mean value of each leaf
+
+        # leaf_values: (n_leaves,) for single-target or (n_leaves, n_targets) for multi-target
         # leaf_samples: (n_leaves,) - number of samples in each leaf
         # leaf_nodes: (n_leaves,) - index of each leaf
         # leaf_error: (n_leaves,) - impurity/squared error of each leaf
@@ -541,30 +561,30 @@ def compute_partition_stats(assignments, leaf_values, leaf_error, leaf_samples, 
       - partition_samples[i]: total number of samples in cluster i
       - partition_mean[i]: weighted mean (centroid) of cluster i
       - partition_error[i]: 1/N_i * sum_s [ (var_s + ||c_s - mu_i||^2) * n_s ]
-    
+
     Parameters
     ----------
     assignments : array_like of shape (L,)
         Cluster index (0..k_-1) for each leaf s=0..L-1.
-    leaf_values : array_like of shape (L,)
-        Centroid (mean) of each leaf (c_s).
-    leaf_error : array_like of shape (L, )
-        Error of each leaf (variance-like term var_s).
+    leaf_values : array_like of shape (L,) or (L, n_targets)
+        Centroid (mean) of each leaf (c_s). For multi-target, shape is (L, n_targets).
+    leaf_error : array_like of shape (L,)
+        Error of each leaf (variance-like term var_s). Scalar per leaf even for multi-target.
     leaf_samples : array_like of shape (L,)
         Number of samples in each leaf (n_s).
     k_ : int
         Number of clusters.
-    
+
     Returns
     -------
     partition_samples : numpy.ndarray of shape (k_,)
         Total samples per cluster (N_i).
-    partition_mean : numpy.ndarray of shape (k_,)
-        Weighted mean per cluster (mu_i).
+    partition_mean : numpy.ndarray of shape (k_,) or (k_, n_targets)
+        Weighted mean per cluster (mu_i). For multi-target, shape is (k_, n_targets).
     partition_error : numpy.ndarray of shape (k_,)
         Average shifted variance per cluster.
     """
-    
+
     # Ensure inputs are numpy arrays for consistent behavior and vectorized operations
     assignments = np.asarray(assignments)
     leaf_values = np.asarray(leaf_values)
@@ -573,88 +593,85 @@ def compute_partition_stats(assignments, leaf_values, leaf_error, leaf_samples, 
 
     L = assignments.shape[0]
 
+    # Detect if multi-target
+    is_multi_target = leaf_values.ndim == 2
+    n_targets = leaf_values.shape[1] if is_multi_target else 1
+
     # Handle L=0 (no leaves) case explicitly
     if L == 0:
         partition_samples = np.zeros(k_, dtype=float)
-        partition_mean = np.full(k_, np.nan, dtype=float)
+        if is_multi_target:
+            partition_mean = np.full((k_, n_targets), np.nan, dtype=float)
+        else:
+            partition_mean = np.full(k_, np.nan, dtype=float)
         partition_error = np.full(k_, np.nan, dtype=float)
         return partition_samples, partition_mean, partition_error
 
     # Validate that assignments are within the expected range [0, k_-1].
-    # This assumption is critical for np.bincount with minlength=k_ 
-    # to produce arrays of exactly length k_.
     if k_ > 0 and (np.any(assignments < 0) or np.any(assignments >= k_)):
         raise ValueError(
             f"Elements in 'assignments' must be between 0 and k_-1 (k_={k_}). "
             f"Found min assignment: {np.min(assignments)}, max assignment: {np.max(assignments)}."
         )
-    elif k_ == 0 and L > 0 : # No clusters but leaves exist
-         raise ValueError("k_ is 0, but there are leaves to assign.")
-    elif k_ == 0 and L == 0: # Already handled by L==0 check, but good to be thorough
+    elif k_ == 0 and L > 0:
+        raise ValueError("k_ is 0, but there are leaves to assign.")
+    elif k_ == 0 and L == 0:
         return np.array([]), np.array([]), np.array([])
 
-
     # 1. Compute partition_samples[i]: total number of samples in cluster i (N_i)
-    # N_i = sum_{s in cluster i} n_s
-    # .astype(float) ensures results are float, e.g. if leaf_samples are integers.
     partition_samples = np.bincount(assignments, weights=leaf_samples, minlength=k_).astype(float)
 
-    # 2. Compute partition_mean[i]: weighted mean (centroid) of cluster i (mu_i)
-    # mu_i = (sum_{s in cluster i} c_s * n_s) / N_i
-    # Numerator: sum_{s in cluster i} (leaf_values_s * leaf_samples_s)
-    weighted_value_sum_per_cluster = np.bincount(assignments, 
-                                                  weights=leaf_values * leaf_samples, 
-                                                  minlength=k_).astype(float)
-    
-    # Initialize partition_mean with NaNs for potentially empty clusters
-    partition_mean = np.full(k_, np.nan, dtype=float)
-    
     # Mask for non-empty clusters (where partition_samples[i] > 0)
     non_empty_clusters_mask = partition_samples > 0
-    
-    # Calculate mean only for non-empty clusters to avoid division by zero
-    # np.divide can also be used with a 'where' clause.
-    if np.any(non_empty_clusters_mask): # Proceed only if there's at least one non-empty cluster
-        partition_mean[non_empty_clusters_mask] = \
-            weighted_value_sum_per_cluster[non_empty_clusters_mask] / partition_samples[non_empty_clusters_mask]
+
+    # 2. Compute partition_mean[i]: weighted mean (centroid) of cluster i (mu_i)
+    if is_multi_target:
+        # For multi-target: partition_mean has shape (k_, n_targets)
+        partition_mean = np.full((k_, n_targets), np.nan, dtype=float)
+        for t in range(n_targets):
+            weighted_value_sum = np.bincount(
+                assignments,
+                weights=leaf_values[:, t] * leaf_samples,
+                minlength=k_
+            ).astype(float)
+            if np.any(non_empty_clusters_mask):
+                partition_mean[non_empty_clusters_mask, t] = \
+                    weighted_value_sum[non_empty_clusters_mask] / partition_samples[non_empty_clusters_mask]
+    else:
+        # Single target: partition_mean has shape (k_,)
+        weighted_value_sum_per_cluster = np.bincount(
+            assignments,
+            weights=leaf_values * leaf_samples,
+            minlength=k_
+        ).astype(float)
+        partition_mean = np.full(k_, np.nan, dtype=float)
+        if np.any(non_empty_clusters_mask):
+            partition_mean[non_empty_clusters_mask] = \
+                weighted_value_sum_per_cluster[non_empty_clusters_mask] / partition_samples[non_empty_clusters_mask]
 
     # 3. Compute partition_error[i]: 1/N_i * sum_s [ (var_s + ||c_s - mu_i||^2) * n_s ]
-    #    where s are leaves in cluster i.
-    
-    # Retrieve the mean (mu_i) for each leaf's assigned cluster.
-    # For leaves assigned to cluster i, this is partition_mean[i].
-    # If cluster i is empty, partition_mean[i] is NaN.
-    # So, mu_for_each_leaf[s] will be NaN if leaf s is in an empty cluster.
-    mu_for_each_leaf = partition_mean[assignments] 
-    
-    # Calculate squared difference: ||c_s - mu_i||^2. For scalar c_s, this is (c_s - mu_i)^2.
-    # If mu_for_each_leaf[s] is NaN, then squared_diff_from_cluster_mean[s] will also be NaN.
-    squared_diff_from_cluster_mean = (leaf_values - mu_for_each_leaf)**2
-    
-    # Term inside the sum for each leaf s: (var_s + ||c_s - mu_i||^2) * n_s
-    # var_s is leaf_error[s].
-    # If squared_diff_from_cluster_mean[s] is NaN, this entire term for leaf s becomes NaN.
-    term_to_sum_for_error_per_leaf = (leaf_error + squared_diff_from_cluster_mean) * leaf_samples
-    
-    # Sum these terms per cluster using bincount.
-    # If term_to_sum_for_error_per_leaf[s] is NaN (because leaf s is in an empty cluster),
-    # and leaf s is assigned to that empty cluster, np.bincount for that cluster might result in NaN.
-    # This is acceptable, as the error for an empty cluster should be NaN.
-    # A NaN term from a leaf in an *empty* cluster will not corrupt the sum for a *non-empty* cluster,
-    # as bincount sums contributions by `assignments` index.
-    # If `assignments[s]` corresponds to a non-empty cluster, then `mu_for_each_leaf[s]` is not NaN,
-    # thus `term_to_sum_for_error_per_leaf[s]` will not be NaN.
-    sum_of_error_terms_per_cluster = np.bincount(assignments, 
-                                                  weights=term_to_sum_for_error_per_leaf, 
-                                                  minlength=k_).astype(float)
+    if is_multi_target:
+        # mu_for_each_leaf: (L, n_targets)
+        mu_for_each_leaf = partition_mean[assignments]
+        # squared_diff: mean over targets of (c_s - mu_i)^2 to match sklearn's aggregated impurity
+        squared_diff_from_cluster_mean = np.mean((leaf_values - mu_for_each_leaf)**2, axis=1)
+    else:
+        mu_for_each_leaf = partition_mean[assignments]
+        squared_diff_from_cluster_mean = (leaf_values - mu_for_each_leaf)**2
 
-    # Initialize partition_error with NaNs
+    # Term inside the sum for each leaf s: (var_s + ||c_s - mu_i||^2) * n_s
+    term_to_sum_for_error_per_leaf = (leaf_error + squared_diff_from_cluster_mean) * leaf_samples
+
+    sum_of_error_terms_per_cluster = np.bincount(
+        assignments,
+        weights=term_to_sum_for_error_per_leaf,
+        minlength=k_
+    ).astype(float)
+
     partition_error = np.full(k_, np.nan, dtype=float)
-    
-    # Calculate error only for non-empty clusters
     if np.any(non_empty_clusters_mask):
         partition_error[non_empty_clusters_mask] = \
             sum_of_error_terms_per_cluster[non_empty_clusters_mask] / partition_samples[non_empty_clusters_mask]
-            
+
     return partition_samples, partition_mean, partition_error
 

@@ -1,6 +1,6 @@
 # Empowering Decision Trees via Shape Functions (NeurIPS 2025)
 
-This the working repository for the paper "[Empowering Decision Trees via Shape Functions](https://arxiv.org/abs/2510.19040)" (NeurIPS 2025). 
+This the working repository for the paper "Empowering Decision Trees via Shape Functions" (NeurIPS 2025). 
 ![sgt visualization](SGT_Viz.png)
 
 ## What's New?
@@ -19,8 +19,10 @@ This the working repository for the paper "[Empowering Decision Trees via Shape 
 Before running our code, please make sure you have the required packages installed. You can do this by running:
 
 ```bash
-conda env create -f environment.yml
-conda activate EmpViaShapes
+python -m venv scart_env
+source scart_env/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
 ## Demo
