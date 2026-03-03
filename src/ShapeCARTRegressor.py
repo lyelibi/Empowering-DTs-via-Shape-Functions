@@ -576,6 +576,40 @@ class ShapeCARTRegressor:
         # predictions has shape (n_samples, n_targets)
         return predictions
 
+    # LY: added apply function to get tree leaf indices to map to kernel matrix.
+    def apply(self, X):
+        """
+        Returns the leaf index each sample falls into.
+        Shape: (n_samples,)
+        """
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+
+        leaf_ids = np.empty(X.shape[0], dtype=int)
+        self._apply_recursive(X, np.arange(X.shape[0]), 0, leaf_ids)
+        return leaf_ids
+
+
+    def _apply_recursive(self, X, sample_idxs, node_idx, leaf_ids):
+        if len(sample_idxs) == 0:
+            return
+
+        if self.is_leaf[node_idx]:
+            leaf_ids[sample_idxs] = node_idx
+            return
+
+        node = self.nodes[node_idx]
+        preds = node.predict(X[sample_idxs])  # branch indices
+
+        for branch_id, child_idx in enumerate(self.children[node_idx]):
+            mask = preds == branch_id
+            self._apply_recursive(
+                X,
+                sample_idxs[mask],
+                child_idx,
+                leaf_ids
+            )
+
 
 
 def upsample(X, pseudolabel_matrix):
